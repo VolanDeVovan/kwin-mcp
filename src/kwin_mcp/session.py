@@ -13,10 +13,13 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+
+from .screenshot import capture_screenshot_dbus
 
 
 class SessionType(Enum):
@@ -43,6 +46,13 @@ class SessionConfig:
     # watch what the AI agent is doing in real time. Requires a host Wayland
     # session ($WAYLAND_DISPLAY must be set on the parent process).
     visible: bool = False
+    # When true, start a background thread that takes a screenshot of the
+    # isolated session every `stream_interval_ms` ms, and spawn the bundled
+    # kwin-mcp-stream-viewer as a separate process on the host compositor
+    # so the user sees a live preview window of what the agent is doing.
+    # Works on every compositor (the preview is just a regular host window).
+    stream: bool = False
+    stream_interval_ms: int = 400
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
@@ -91,6 +101,17 @@ class Session:
         # KWin's first write (see start() — we read stdout but not stderr).
         self._stderr_log_path: Path | None = None
         self._stderr_log_fp: object = None
+        # Optional live preview streamer (config.stream): a background thread
+        # writes screenshots to a stable PNG path, and a side-process viewer
+        # window on the host compositor refreshes it on every change.
+        self._stream_png_path: Path | None = None
+        self._streamer_stop: threading.Event = threading.Event()
+        self._streamer_thread: threading.Thread | None = None
+        self._streamer_viewer_proc: subprocess.Popen[bytes] | None = None
+        # Snapshot of the host process env taken at __init__ — used to launch
+        # the viewer on the host compositor, before _build_env() rewrites
+        # WAYLAND_DISPLAY/XDG_CURRENT_DESKTOP for the isolated session.
+        self._host_env: dict[str, str] = dict(os.environ)
 
     @property
     def is_running(self) -> bool:
@@ -216,7 +237,95 @@ class Session:
             screenshot_dir=screenshot_dir,
             home_dir=self._home_dir,
         )
+
+        if config.stream:
+            self._start_streamer()
+
         return self._info
+
+    def _start_streamer(self) -> None:
+        """Launch the screenshot loop + viewer window on the host compositor."""
+        if self._info is None or self._config is None:
+            return
+        self._stream_png_path = (
+            Path(tempfile.gettempdir()) / f"kwin-mcp-stream-{self._socket_name}.png"
+        )
+        self._streamer_stop = threading.Event()
+        self._streamer_thread = threading.Thread(
+            target=self._stream_loop,
+            name="kwin-mcp-streamer",
+            daemon=True,
+        )
+        self._streamer_thread.start()
+
+        # Spawn the viewer in the HOST process env (so it appears as a
+        # regular window on niri/sway/GNOME/Plasma, not inside the isolated
+        # virtual KWin). _build_env() rewrote our session env for KWin, but
+        # we kept a snapshot of the parent env in _host_env for exactly this.
+        viewer_bin = shutil.which("kwin-mcp-stream-viewer") or "kwin-mcp-stream-viewer"
+        try:
+            self._streamer_viewer_proc = subprocess.Popen(
+                [
+                    viewer_bin,
+                    str(self._stream_png_path),
+                    "--title",
+                    f"kwin-mcp stream ({self._socket_name})",
+                    "--poll-ms",
+                    str(max(100, self._config.stream_interval_ms // 2)),
+                ],
+                env=self._host_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            # Viewer not installed — keep the screenshot loop anyway so the
+            # PNG is available for an external viewer the user spawns by hand.
+            self._streamer_viewer_proc = None
+
+    def _stream_loop(self) -> None:
+        """Background thread: dump a fresh screenshot to the stream PNG path.
+
+        Writes to a `.tmp` sibling and atomically renames so the viewer never
+        catches a half-written file.
+        """
+        if self._info is None or self._stream_png_path is None or self._config is None:
+            return
+        target = self._stream_png_path
+        tmp = target.with_suffix(".tmp.png")
+        interval = max(0.1, self._config.stream_interval_ms / 1000.0)
+        while not self._streamer_stop.is_set():
+            try:
+                capture_screenshot_dbus(
+                    self._info.dbus_address,
+                    tmp,
+                    include_cursor=True,
+                )
+                os.replace(tmp, target)
+            except Exception:
+                # Don't kill the thread on transient D-Bus errors; the next
+                # tick may succeed. Errors get muffled by design — KWin's own
+                # transient hiccups during app launch are noisy.
+                pass
+            if self._streamer_stop.wait(interval):
+                break
+
+    def _stop_streamer(self) -> None:
+        if self._streamer_thread is not None:
+            self._streamer_stop.set()
+            self._streamer_thread.join(timeout=2.0)
+            self._streamer_thread = None
+        if self._streamer_viewer_proc is not None:
+            with contextlib.suppress(ProcessLookupError):
+                self._streamer_viewer_proc.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self._streamer_viewer_proc.wait(timeout=2.0)
+            with contextlib.suppress(ProcessLookupError):
+                self._streamer_viewer_proc.kill()
+            self._streamer_viewer_proc = None
+        if self._stream_png_path is not None:
+            self._stream_png_path.unlink(missing_ok=True)
+            self._stream_png_path.with_suffix(".tmp.png").unlink(missing_ok=True)
+            self._stream_png_path = None
 
     def launch_app(self, command: list[str], extra_env: dict[str, str] | None = None) -> AppInfo:
         """Launch an application inside the isolated session.
@@ -298,6 +407,10 @@ class Session:
         """Stop the isolated session and clean up all processes."""
         if self._process is None:
             return
+
+        # Tear down the streamer first — it talks to KWin over D-Bus and
+        # would otherwise log a flurry of broken-pipe errors as we kill KWin.
+        self._stop_streamer()
 
         # Send SIGTERM to the entire process group (all children)
         try:

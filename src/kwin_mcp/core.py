@@ -177,6 +177,8 @@ class AutomationEngine:
         isolate_home: bool = False,
         keep_home: bool = False,
         visible: bool = False,
+        stream: bool = False,
+        stream_interval_ms: int = 400,
         env: dict[str, str] | None = None,
     ) -> str:
         """Start an isolated KWin Wayland session, optionally launching an app."""
@@ -194,6 +196,8 @@ class AutomationEngine:
             isolate_home=isolate_home,
             keep_home=keep_home,
             visible=visible,
+            stream=stream,
+            stream_interval_ms=stream_interval_ms,
         )
         info = self._session.start(config)
 

@@ -77,6 +77,23 @@ def session_start(
             "WAYLAND_DISPLAY from the host."
         ),
     ] = False,
+    stream: Annotated[
+        bool,
+        Field(
+            description="Live preview: start a side-window on the host compositor "
+            "that shows a near-real-time PNG snapshot of the isolated session "
+            "(default interval 400 ms). Compositor-agnostic; works on niri, sway, "
+            "GNOME, Plasma, ... without any portal dependency. Requires the bundled "
+            "kwin-mcp-stream-viewer binary to be on PATH."
+        ),
+    ] = False,
+    stream_interval_ms: Annotated[
+        int,
+        Field(
+            description="How often the streamer refreshes the preview PNG, in ms. "
+            "Lower = smoother but more CPU/disk. Only used when stream=true."
+        ),
+    ] = 400,
     env: Annotated[
         dict[str, str] | None,
         Field(description="Extra environment variables to pass to the launched app."),
@@ -97,6 +114,8 @@ def session_start(
         isolate_home=isolate_home,
         keep_home=keep_home,
         visible=visible,
+        stream=stream,
+        stream_interval_ms=stream_interval_ms,
         env=env,
     )
 

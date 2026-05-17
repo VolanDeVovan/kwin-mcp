@@ -69,6 +69,7 @@ Documentation = "https://github.com/isac322/kwin-mcp#readme"
 [project.scripts]
 kwin-mcp = "kwin_mcp.server:main"
 kwin-mcp-cli = "kwin_mcp.cli:main"
+kwin-mcp-stream-viewer = "kwin_mcp.stream_viewer:main"
 
 [build-system]
 requires = ["uv_build>=0.10.3,<0.12.0"]
