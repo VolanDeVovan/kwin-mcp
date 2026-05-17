@@ -417,10 +417,17 @@ wait $KWIN_PID
 
     def _build_env(self, config: SessionConfig) -> dict[str, str]:
         """Build the environment for the isolated session."""
+        # NOTE: do NOT set KDE_FULL_SESSION / KDE_SESSION_VERSION here. They
+        # are meant to advertise a *real, complete* Plasma session, which
+        # makes KWin try to talk to kded6, kglobalaccel, plasmashell, and the
+        # KDE polkit agent. None of those exist in our isolated --virtual
+        # session, and KWin segfaults during init on hosts that don't run
+        # Plasma as the host desktop (e.g. anyone using kwin-mcp from GNOME,
+        # niri, sway, hyprland, etc.).
+        # XDG_CURRENT_DESKTOP=KDE is enough on its own to make the right
+        # xdg-desktop-portal backend get picked.
         env = {
             **os.environ,
-            "KDE_FULL_SESSION": "true",
-            "KDE_SESSION_VERSION": "6",
             "XDG_SESSION_TYPE": "wayland",
             "XDG_CURRENT_DESKTOP": "KDE",
             "QT_LINUX_ACCESSIBILITY_ALWAYS_ON": "1",
