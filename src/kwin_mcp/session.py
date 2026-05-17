@@ -80,6 +80,11 @@ class Session:
         self._app_counter: int = 0
         self._config: SessionConfig | None = None
         self._home_dir: Path | None = None
+        # Captured stderr of the wrapper / KWin / xdg-desktop-portal warnings.
+        # Goes to a file so a chatty stderr can't fill the pipe and deadlock
+        # KWin's first write (see start() — we read stdout but not stderr).
+        self._stderr_log_path: Path | None = None
+        self._stderr_log_fp: object = None
 
     @property
     def is_running(self) -> bool:
@@ -144,11 +149,20 @@ class Session:
         # Build the wrapper script that runs inside dbus-run-session
         wrapper_script = self._build_wrapper_script(config)
 
+        # Capture stderr to a file rather than a pipe. xdg-desktop-portal
+        # activation, dbus-daemon, and Qt warnings together easily exceed the
+        # default 64 KiB pipe buffer; since we only read stdout (for the
+        # DBUS_SESSION_BUS_ADDRESS / READY handshake) a full pipe blocks
+        # KWin's first write and the socket never appears.
+        fd, stderr_path = tempfile.mkstemp(prefix="kwin-mcp-stderr-", suffix=".log")
+        self._stderr_log_path = Path(stderr_path)
+        self._stderr_log_fp = os.fdopen(fd, "wb", buffering=0)
+
         # Start the isolated session in its own process group
         self._process = subprocess.Popen(
             ["dbus-run-session", "bash", "-c", wrapper_script],
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=self._stderr_log_fp,
             env=self._build_env(config),
             start_new_session=True,
         )
@@ -299,6 +313,16 @@ class Session:
                 self._process.kill()
             with contextlib.suppress(subprocess.TimeoutExpired):
                 self._process.wait(timeout=3)
+
+        # Close and remove the stderr capture file. Keep it on disk only if
+        # the wrapper exited abnormally so the user can post-mortem.
+        if self._stderr_log_fp is not None:
+            with contextlib.suppress(Exception):
+                self._stderr_log_fp.close()
+            self._stderr_log_fp = None
+        if self._stderr_log_path is not None and self._process.returncode in (0, -signal.SIGTERM):
+            self._stderr_log_path.unlink(missing_ok=True)
+            self._stderr_log_path = None
 
         # Clean up home directory and/or screenshot directory
         if self._home_dir is not None:
