@@ -176,6 +176,7 @@ class AutomationEngine:
         keep_screenshots: bool = False,
         isolate_home: bool = False,
         keep_home: bool = False,
+        visible: bool = False,
         env: dict[str, str] | None = None,
     ) -> str:
         """Start an isolated KWin Wayland session, optionally launching an app."""
@@ -192,6 +193,7 @@ class AutomationEngine:
             keep_screenshots=keep_screenshots,
             isolate_home=isolate_home,
             keep_home=keep_home,
+            visible=visible,
         )
         info = self._session.start(config)
 

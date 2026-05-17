@@ -67,6 +67,16 @@ def session_start(
             "Files must be cleaned up manually when enabled."
         ),
     ] = False,
+    visible: Annotated[
+        bool,
+        Field(
+            description="Run KWin nested as a Wayland client of the host compositor "
+            "(appears as a regular window in niri/sway/GNOME/Plasma/...) instead of "
+            "the default invisible --virtual framebuffer. Useful for watching the "
+            "session in real time. Requires the MCP server to inherit a "
+            "WAYLAND_DISPLAY from the host."
+        ),
+    ] = False,
     env: Annotated[
         dict[str, str] | None,
         Field(description="Extra environment variables to pass to the launched app."),
@@ -86,6 +96,7 @@ def session_start(
         keep_screenshots=keep_screenshots,
         isolate_home=isolate_home,
         keep_home=keep_home,
+        visible=visible,
         env=env,
     )
 

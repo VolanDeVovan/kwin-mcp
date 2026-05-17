@@ -37,6 +37,12 @@ class SessionConfig:
     keep_screenshots: bool = False
     isolate_home: bool = False
     keep_home: bool = False
+    # When true, run KWin nested as a Wayland client of the host compositor
+    # (a normal window in niri / sway / GNOME / Plasma / weston) instead of
+    # using --virtual (an invisible in-memory framebuffer). Lets the user
+    # watch what the AI agent is doing in real time. Requires a host Wayland
+    # session ($WAYLAND_DISPLAY must be set on the parent process).
+    visible: bool = False
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
@@ -391,17 +397,7 @@ sleep 0.3
 # only after KWin creates it.
 dbus-update-activation-environment WAYLAND_DISPLAY={self._socket_name} QT_QPA_PLATFORM=wayland
 
-# Start KWin WITHOUT WAYLAND_DISPLAY to prevent nesting attempt.
-# KWin with --virtual creates its own compositor, it must not try
-# to connect to another compositor as a client.
-# Explicitly pass KWIN_ permission env vars to ensure they reach the
-# KWin process (environment inheritance through dbus-run-session can be unreliable).
-env -u WAYLAND_DISPLAY -u QT_QPA_PLATFORM \
-    KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 \
-    KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1 \
-    kwin_wayland --virtual --no-lockscreen \
-    --width {config.screen_width} --height {config.screen_height} \
-    --socket {self._socket_name} &
+{self._kwin_invocation(config)}
 KWIN_PID=$!
 
 # Wait for KWin socket to appear
@@ -414,6 +410,28 @@ echo "READY"
 # Block until kwin exits
 wait $KWIN_PID
 """
+
+    def _kwin_invocation(self, config: SessionConfig) -> str:
+        """Bash fragment that launches kwin_wayland in the background.
+
+        - virtual mode (default): an in-memory framebuffer, invisible. KWin
+          must NOT inherit $WAYLAND_DISPLAY or it tries to connect to that
+          compositor as a client instead of creating its own.
+        - visible mode: KWin runs as a nested Wayland client of the host
+          compositor (niri, sway, GNOME, Plasma, ...) and appears as a
+          regular window the user can watch. $WAYLAND_DISPLAY is inherited.
+        """
+        common = (
+            "KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 "
+            "KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1 "
+            f"kwin_wayland --no-lockscreen "
+            f"--width {config.screen_width} --height {config.screen_height} "
+            f"--socket {self._socket_name}"
+        )
+        if config.visible:
+            # Inherit WAYLAND_DISPLAY so KWin nests inside the host compositor.
+            return f"{common} &"
+        return f"env -u WAYLAND_DISPLAY -u QT_QPA_PLATFORM {common} --virtual &"
 
     def _build_env(self, config: SessionConfig) -> dict[str, str]:
         """Build the environment for the isolated session."""
@@ -443,9 +461,13 @@ wait $KWIN_PID
             # Safe in isolated virtual sessions where there is no user desktop to protect.
             "KWIN_WAYLAND_NO_PERMISSION_CHECKS": "1",
         }
-        # Remove host display references to avoid kwin connecting to host
-        env.pop("WAYLAND_DISPLAY", None)
-        env.pop("DISPLAY", None)
+        # Remove host display references to avoid kwin connecting to host —
+        # only in virtual mode. In visible mode we deliberately let KWin
+        # inherit $WAYLAND_DISPLAY so it can nest as a Wayland client in
+        # the host compositor.
+        if not config.visible:
+            env.pop("WAYLAND_DISPLAY", None)
+            env.pop("DISPLAY", None)
 
         env.update(self._xdg_isolation_env())
         env.update(config.extra_env)
